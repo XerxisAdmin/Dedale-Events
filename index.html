@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dedale Company Events</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;900&family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/*
+============================================================================
+ DEDALE COMPANY EVENTS — SETUP NOTES (read before deploying)
+============================================================================
+1. AZURE AD / MSAL
+   - Reuse the SAME Client ID + Tenant used by Service Desk / Task Manager /
+     Inventory (already has Sites.ReadWrite.All admin-consented).
+   - Paste that Client ID + Tenant ID into MSAL_CONFIG below.
+   - In Entra admin center -> App registrations -> that app -> Authentication
+     -> add THIS page's final deployed URL as a Redirect URI (SPA platform),
+     or sign-in will fail with a redirect mismatch error.
+
+2. SHAREPOINT STORAGE
+   - Two lists are used: "CompanyEvents" (one row per event) and
+     "EventAttendance" (one row per check-in, linked by EventId).
+   - Both are created automatically the first time the admin view loads, if
+     they don't already exist. No manual list setup needed.
+   - Defaults to the existing ITServiceDesk site (SP_HOSTNAME / SP_SITE_PATH
+     below) — change if you'd rather use a different site.
+
+3. USING IT
+   - Admin: open the deployed URL with ?view=admin — create an event (name +
+     date), get its QR code, and open it any time to see live check-ins.
+   - Guests: scan the event's QR — it encodes a link with that event's ID, so
+     it lands them on check-in for that specific event.
+   - ADMIN_PIN below gates "Clear Attendance" / "Delete Event" — change it
+     before use.
+============================================================================
+*/
+:root{--navy:#141628;--navy-mid:#1a1d38;--accent:#cc2244;--accent-dim:#881630;--teal:#22ccdd;--bg:#141628;--surface:#222646;--surface2:#282c52;--border:#383d72;--border2:#484e8a;--text:#eef1ff;--text2:#ccd2f5;--text3:#a6adda;--green:#22cc88;--green-bg:#0a2a1a;--yellow:#d4a830;--yellow-bg:#2a1e00;--red:#cc2244;--red-bg:#2a0a14;--orange:#e07030;--orange-bg:#2a1200;--gold:#d4a830;--gold-light:#f0c848;--gold-dark:#8a6e18;--crimson:#cc2244;--crimson-dark:#881630;--crimson-glow:#ff2255;--blue:#4488ff;--blue-light:#66aaff;--blue-dark:#1a4499;--purple:#8866ff;--shadow-sm:0 0 16px rgba(68,136,255,0.08);--shadow:0 4px 24px rgba(68,136,255,0.12);--shadow-lg:0 8px 32px rgba(0,0,0,0.7);--radius:2px;}
+*{box-sizing:border-box;}
+body{font-family:'Rajdhani',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;margin:0;font-size:16px;display:flex;flex-direction:column;align-items:center;}
+.topbar{width:100%;background:var(--navy-mid);border-bottom:1px solid var(--border);padding:16px 24px;display:flex;align-items:center;justify-content:space-between;position:relative;}
+.topbar::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:linear-gradient(90deg,var(--crimson)66,var(--gold)44,var(--blue)22,transparent);}
+.logo-text{font-size:15px;font-weight:900;color:#fff;letter-spacing:2px;font-family:'Orbitron',monospace;}
+.logo-sub{font-size:9px;color:var(--crimson);letter-spacing:2px;text-transform:uppercase;margin-top:3px;font-family:'Share Tech Mono',monospace;}
+.main{width:100%;max-width:560px;padding:28px 20px 60px;display:flex;flex-direction:column;align-items:center;gap:18px;}
+.card{background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow-sm);width:100%;padding:26px 24px;position:relative;clip-path:polygon(0 0,calc(100% - 12px) 0,100% 12px,100% 100%,12px 100%,0 calc(100% - 12px));}
+.card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,var(--crimson)aa,var(--gold)44,transparent);}
+.event-name{font-family:'Orbitron',monospace;font-size:19px;font-weight:700;color:#fff;letter-spacing:1px;margin:0 0 4px;text-align:center;}
+.event-date{font-family:'Share Tech Mono',monospace;font-size:12px;color:var(--gold);letter-spacing:1.5px;text-transform:uppercase;text-align:center;margin-bottom:0;}
+.center{text-align:center;}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:14px 26px;font-size:13px;font-family:'Orbitron',monospace;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;border:none;transition:all .15s;width:100%;clip-path:polygon(0 0,calc(100% - 8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100% - 8px));}
+.btn-primary{background:linear-gradient(135deg,var(--crimson-dark),var(--crimson));color:#fff;box-shadow:0 2px 14px rgba(196,18,48,.4);}
+.btn-primary:hover{background:linear-gradient(135deg,var(--crimson),var(--crimson-glow));}
+.btn-primary:disabled{opacity:.5;cursor:default;}
+.btn-outline{background:transparent;color:var(--gold);border:1px solid var(--gold-dark);clip-path:none;width:auto;padding:10px 18px;font-size:11px;}
+.btn-outline:hover{background:rgba(192,136,32,.1);border-color:var(--gold);}
+.btn-danger{background:transparent;color:var(--crimson);border:1px solid var(--crimson-dark);clip-path:none;width:auto;padding:10px 18px;font-size:11px;}
+.btn-row{display:flex;gap:10px;flex-wrap:wrap;width:100%;}
+.status-msg{font-family:'Share Tech Mono',monospace;font-size:12px;letter-spacing:1px;color:var(--text3);text-align:center;min-height:16px;}
+.status-msg.err{color:var(--crimson-glow);}
+.status-msg.ok{color:var(--green);}
+.hidden{display:none !important;}
+.user-chip{display:flex;align-items:center;gap:10px;background:var(--navy-mid);border:1px solid var(--border);padding:10px 14px;margin-bottom:16px;}
+.user-chip .av{width:32px;height:32px;border-radius:50%;background:var(--crimson-dark);color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Orbitron',monospace;font-size:13px;font-weight:700;flex-shrink:0;}
+.user-chip .info{overflow:hidden;}
+.user-chip .name{font-size:13px;color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.user-chip .mail{font-size:11px;color:var(--text3);font-family:'Share Tech Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.checkin-badge{width:88px;height:88px;border-radius:50%;background:var(--green-bg);border:2px solid var(--green);display:flex;align-items:center;justify-content:center;font-size:40px;margin:6px auto 14px;}
+.confirm-title{font-family:'Orbitron',monospace;font-size:16px;color:var(--green);text-align:center;letter-spacing:1px;margin-bottom:4px;}
+.confirm-sub{font-family:'Share Tech Mono',monospace;font-size:12px;color:var(--text3);text-align:center;}
+.qr-wrap{background:#fff;padding:16px;display:flex;justify-content:center;align-items:center;width:fit-content;margin:0 auto 14px;}
+.qr-wrap img{display:block;width:220px;height:220px;}
+.qr-url{font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--text3);text-align:center;word-break:break-all;margin-bottom:4px;}
+.stat-card{background:var(--surface2);border:1px solid var(--border);padding:16px 20px;text-align:center;margin-bottom:14px;}
+.stat-label{font-size:9px;letter-spacing:2.5px;text-transform:uppercase;color:var(--crimson);margin-bottom:6px;font-family:'Share Tech Mono',monospace;}
+.stat-value{font-size:38px;font-weight:900;color:#fff;line-height:1;font-family:'Orbitron',monospace;}
+.attendee-list{max-height:340px;overflow-y:auto;border:1px solid var(--border);}
+.attendee-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border);font-size:13px;}
+.attendee-row:last-child{border-bottom:none;}
+.attendee-row .n{color:var(--text);font-weight:600;}
+.attendee-row .t{color:var(--text3);font-family:'Share Tech Mono',monospace;font-size:11px;white-space:nowrap;}
+.empty-state{padding:24px;text-align:center;color:var(--text3);font-size:13px;}
+.section-label{font-size:10px;letter-spacing:2.5px;text-transform:uppercase;color:var(--gold);font-family:'Share Tech Mono',monospace;margin-bottom:10px;display:block;}
+.spinner{width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.input{width:100%;padding:11px 14px;border:1px solid var(--border);background:var(--navy-mid);color:var(--text);font-family:'Share Tech Mono',monospace;font-size:13px;outline:none;margin-bottom:10px;}
+.input:focus{border-color:var(--crimson-dark);}
+.form-label{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text3);margin-bottom:5px;display:block;font-family:'Share Tech Mono',monospace;}
+.event-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;border-bottom:1px solid var(--border);}
+.event-row:last-child{border-bottom:none;}
+.event-row .en{color:var(--text);font-weight:600;font-size:14px;}
+.event-row .ed{color:var(--text3);font-size:11px;font-family:'Share Tech Mono',monospace;letter-spacing:.5px;}
+.count-badge{background:var(--surface2);border:1px solid var(--border);color:var(--gold);font-family:'Orbitron',monospace;font-size:12px;padding:4px 10px;flex-shrink:0;}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div>
+    <div class="logo-text">DEDALE</div>
+    <div class="logo-sub" id="logo-sub">Company Events</div>
+  </div>
+  <div id="topbar-user" class="status-msg"></div>
+</div>
+
+<div class="main">
+
+  <!-- SIGN-IN VIEW -->
+  <div class="card" id="signin-view">
+    <div class="status-msg" style="margin-bottom:14px">Sign in with your Dedale Microsoft account to continue.</div>
+    <button class="btn btn-primary" id="signin-btn">Sign in with Microsoft</button>
+    <div class="status-msg" id="signin-status"></div>
+  </div>
+
+  <!-- GUEST: EVENT CARD + CHECK-IN -->
+  <div class="card hidden" id="guest-event-card">
+    <div class="event-name" id="guest-event-name"></div>
+    <div class="event-date" id="guest-event-date"></div>
+  </div>
+  <div class="card hidden" id="guest-checkin-view">
+    <div class="user-chip" id="user-chip"></div>
+    <div id="checkin-inner"></div>
+    <div class="status-msg" id="checkin-status"></div>
+  </div>
+  <div class="card hidden" id="guest-noevent-view">
+    <div class="status-msg">No event specified. Please scan the QR code provided by the organizer.</div>
+  </div>
+
+  <!-- ADMIN: HOME (create + list events) -->
+  <div class="card hidden" id="admin-home-view">
+    <span class="section-label">Create Event</span>
+    <label class="form-label">Event Name</label>
+    <input class="input" id="new-event-name" placeholder="e.g. Dedale Team Building">
+    <label class="form-label">Event Date</label>
+    <input class="input" id="new-event-date" type="date">
+    <button class="btn btn-primary" id="create-event-btn">+ Create Event</button>
+    <div class="status-msg" id="create-event-status"></div>
+  </div>
+  <div class="card hidden" id="admin-events-list-view">
+    <span class="section-label">Events</span>
+    <div id="events-list"></div>
+    <div class="status-msg" id="events-list-status"></div>
+  </div>
+
+  <!-- ADMIN: EVENT DETAIL -->
+  <div class="card hidden" id="admin-detail-view">
+    <button class="btn-outline" id="back-to-events-btn" style="margin-bottom:16px">← All Events</button>
+    <div class="event-name" id="detail-event-name"></div>
+    <div class="event-date" id="detail-event-date" style="margin-bottom:16px"></div>
+    <span class="section-label">Scan to check in</span>
+    <div class="qr-wrap"><img id="qr-img" alt="QR code"></div>
+    <div class="qr-url" id="qr-url" style="margin-bottom:16px"></div>
+    <div class="stat-card">
+      <div class="stat-label">Checked In</div>
+      <div class="stat-value" id="detail-count">0</div>
+    </div>
+    <span class="section-label">Attendees (latest first)</span>
+    <div class="attendee-list" id="detail-list"></div>
+    <div class="btn-row" style="margin-top:16px">
+      <button class="btn-outline" id="detail-refresh-btn">↻ Refresh</button>
+      <button class="btn-outline" id="detail-export-btn">⭳ Export CSV</button>
+      <button class="btn-danger" id="detail-clear-btn">✕ Clear Attendance</button>
+      <button class="btn-danger" id="detail-delete-btn">🗑 Delete Event</button>
+    </div>
+    <div class="status-msg" id="detail-status"></div>
+  </div>
+
+</div>
+
+<script src="https://alcdn.msauth.net/browser/2.38.0/js/msal-browser.min.js"></script>
+<script>
+/* ============================== CONFIG ================================ */
+const MSAL_CONFIG = {
+  auth: {
+    clientId: 'PASTE_CLIENT_ID_HERE',               // same Client ID as Service Desk / Task Manager
+    authority: 'https://login.microsoftonline.com/PASTE_TENANT_ID_HERE',
+    redirectUri: window.location.origin + window.location.pathname
+  },
+  cache: { cacheLocation: 'localStorage' }
+};
+const GRAPH_SCOPES = ['Sites.ReadWrite.All', 'User.Read'];
+
+const SP_HOSTNAME     = 'softwareclub.sharepoint.com'; // same tenant as ITServiceDesk site
+const SP_SITE_PATH    = '/sites/ITServiceDesk';        // change if you want a different site
+const EVENTS_LIST     = 'CompanyEvents';               // auto-created on first admin load if missing
+const ATTENDANCE_LIST = 'EventAttendance';             // auto-created on first admin load if missing
+
+const ADMIN_PIN = '2468';                              // change before use
+/* ======================================================================= */
+
+const SP_SITE_URL        = 'https://graph.microsoft.com/v1.0/sites/' + SP_HOSTNAME + ':' + SP_SITE_PATH;
+const EVENTS_ITEMS_URL   = SP_SITE_URL + ':/lists/' + EVENTS_LIST + '/items';
+const ATTEND_ITEMS_URL   = SP_SITE_URL + ':/lists/' + ATTENDANCE_LIST + '/items';
+
+const urlParams = new URLSearchParams(window.location.search);
+const isAdmin = urlParams.get('view') === 'admin';
+const guestEventId = urlParams.get('event') || '';
+const baseUrl = window.location.origin + window.location.pathname;
+
+const msalApp = new msal.PublicClientApplication(MSAL_CONFIG);
+let account = null;
+let currentEventId = isAdmin ? (urlParams.get('event') || null) : null;
+let allEventsCache = [];
+let detailAttendeesCache = [];
+
+function setStatus(elId, msg, cls){
+  const el = document.getElementById(elId);
+  if(!el) return;
+  el.textContent = msg || '';
+  el.className = 'status-msg' + (cls ? ' ' + cls : '');
+}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function initials(name){
+  const parts=(name||'').trim().split(/\s+/);
+  return ((parts[0]||'')[0]||'?').toUpperCase() + ((parts[1]||'')[0]||'').toUpperCase();
+}
+function fmtDate(iso){
+  if(!iso) return '';
+  const d = new Date(iso + (iso.length<=10 ? 'T00:00:00' : ''));
+  if(isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { year:'numeric', month:'long', day:'numeric' });
+}
+
+/* ------------------------------ GRAPH HELPERS --------------------------- */
+async function getToken(){
+  const req = { scopes: GRAPH_SCOPES, account };
+  try{ return (await msalApp.acquireTokenSilent(req)).accessToken; }
+  catch(e){ return (await msalApp.acquireTokenPopup(req)).accessToken; }
+}
+async function graphFetch(url, opts){
+  const token = await getToken();
+  opts = opts || {};
+  opts.headers = Object.assign({ Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, opts.headers || {});
+  return fetch(url, opts);
+}
+async function ensureListExists(listName, columns){
+  const itemsUrl = SP_SITE_URL + ':/lists/' + listName + '/items';
+  try{
+    const check = await graphFetch(itemsUrl + '?$top=1');
+    if(check.ok) return true;
+    if(check.status !== 404) return true;
+  }catch(e){}
+  const siteRes = await graphFetch(SP_SITE_URL);
+  if(!siteRes.ok) throw new Error('Cannot reach SharePoint site "' + SP_SITE_PATH + '".');
+  const site = await siteRes.json();
+  const createRes = await graphFetch('https://graph.microsoft.com/v1.0/sites/' + site.id + '/lists', {
+    method: 'POST',
+    body: JSON.stringify({ displayName: listName, columns: columns, list: { template: 'genericList' } })
+  });
+  if(!createRes.ok){
+    const t = await createRes.text();
+    throw new Error('Could not auto-create the "' + listName + '" list. (' + t + ')');
+  }
+  return true;
+}
+async function ensureListsExist(){
+  await ensureListExists(EVENTS_LIST, [
+    { name: 'EventDate', text: {} }
+  ]);
+  await ensureListExists(ATTENDANCE_LIST, [
+    { name: 'Email', text: {} },
+    { name: 'CheckedInAt', text: {} },
+    { name: 'EventId', text: {} },
+    { name: 'EventName', text: {} },
+    { name: 'EventDate', text: {} }
+  ]);
+}
+
+/* ------------------------------ DATA ACCESS ----------------------------- */
+async function fetchEvents(){
+  const res = await graphFetch(EVENTS_ITEMS_URL + '?expand=fields&$top=500');
+  if(!res.ok) throw new Error('Could not load events (HTTP ' + res.status + ').');
+  const data = await res.json();
+  return (data.value || []).map(it => ({
+    id: it.id,
+    name: (it.fields && it.fields.Title) || '',
+    date: (it.fields && it.fields.EventDate) || ''
+  })).sort((a,b) => (b.date||'').localeCompare(a.date||''));
+}
+async function fetchEventById(id){
+  const res = await graphFetch(EVENTS_ITEMS_URL + '/' + id + '?expand=fields');
+  if(!res.ok) return null;
+  const it = await res.json();
+  return { id: it.id, name: (it.fields && it.fields.Title) || '', date: (it.fields && it.fields.EventDate) || '' };
+}
+async function createEvent(name, dateISO){
+  const res = await graphFetch(EVENTS_ITEMS_URL, {
+    method: 'POST',
+    body: JSON.stringify({ fields: { Title: name, EventDate: dateISO } })
+  });
+  if(!res.ok){ const t = await res.text(); throw new Error('Could not create event. (' + t + ')'); }
+  const created = await res.json();
+  return created.id;
+}
+async function deleteEvent(id){
+  const res = await graphFetch(EVENTS_ITEMS_URL + '/' + id, { method: 'DELETE' });
+  if(!res.ok && res.status !== 404){ throw new Error('Could not delete event (HTTP ' + res.status + ').'); }
+}
+async function fetchAllAttendance(){
+  const res = await graphFetch(ATTEND_ITEMS_URL + '?expand=fields&$top=2000&$orderby=createdDateTime desc');
+  if(!res.ok) throw new Error('Could not load attendance (HTTP ' + res.status + ').');
+  const data = await res.json();
+  return (data.value || []).map(it => ({
+    id: it.id,
+    name: (it.fields && it.fields.Title) || '',
+    email: (it.fields && it.fields.Email) || '',
+    checkedInAt: (it.fields && it.fields.CheckedInAt) || '',
+    eventId: (it.fields && it.fields.EventId) || '',
+    eventName: (it.fields && it.fields.EventName) || ''
+  }));
+}
+async function addAttendee(eventId, eventName, eventDate, name, email){
+  const res = await graphFetch(ATTEND_ITEMS_URL, {
+    method: 'POST',
+    body: JSON.stringify({ fields: {
+      Title: name, Email: email, CheckedInAt: new Date().toISOString(),
+      EventId: String(eventId), EventName: eventName, EventDate: eventDate
+    } })
+  });
+  if(!res.ok){ const t = await res.text(); throw new Error('Check-in failed (HTTP ' + res.status + '). ' + t); }
+}
+async function deleteAttendee(id){
+  const res = await graphFetch(ATTEND_ITEMS_URL + '/' + id, { method: 'DELETE' });
+  if(!res.ok && res.status !== 404){ throw new Error('Could not delete record (HTTP ' + res.status + ').'); }
+}
+
+/* ------------------------------- AUTH ----------------------------------- */
+async function doSignIn(){
+  setStatus('signin-status', 'Opening Microsoft sign-in…');
+  try{
+    const r = await msalApp.loginPopup({ scopes: GRAPH_SCOPES });
+    account = r.account;
+    msalApp.setActiveAccount(account);
+    afterSignIn();
+  }catch(e){
+    setStatus('signin-status', 'Sign-in failed: ' + (e.errorMessage || e.message || e), 'err');
+  }
+}
+function renderUserChip(){
+  const name = (account && account.name) || '';
+  const email = (account && account.username) || '';
+  const chip = document.getElementById('user-chip');
+  if(chip) chip.innerHTML =
+    '<div class="av">' + esc(initials(name)) + '</div>' +
+    '<div class="info"><div class="name">' + esc(name) + '</div><div class="mail">' + esc(email) + '</div></div>';
+  document.getElementById('topbar-user').textContent = name || '';
+}
+async function afterSignIn(){
+  document.getElementById('signin-view').classList.add('hidden');
+  renderUserChip();
+  try{ await ensureListsExist(); }catch(e){ /* surfaced later if it truly blocks an action */ }
+  if(isAdmin){
+    document.getElementById('logo-sub').textContent = 'Company Events — Admin';
+    if(currentEventId){ openEventDetail(currentEventId); }
+    else{ showAdminHome(); }
+  }else{
+    document.getElementById('logo-sub').textContent = 'Company Events';
+    if(!guestEventId){
+      document.getElementById('guest-noevent-view').classList.remove('hidden');
+    }else{
+      await renderGuestCheckin(guestEventId);
+    }
+  }
+}
+
+/* ---------------------------- GUEST CHECK-IN ----------------------------- */
+let checkinInFlight = false;
+async function renderGuestCheckin(eventId){
+  const ev = await fetchEventById(eventId).catch(() => null);
+  if(!ev){
+    document.getElementById('guest-noevent-view').classList.remove('hidden');
+    document.getElementById('guest-noevent-view').querySelector('.status-msg').textContent =
+      'This event could not be found. Ask the organizer for a fresh QR code.';
+    return;
+  }
+  document.getElementById('guest-event-card').classList.remove('hidden');
+  document.getElementById('guest-checkin-view').classList.remove('hidden');
+  document.getElementById('guest-event-name').textContent = ev.name;
+  document.getElementById('guest-event-date').textContent = fmtDate(ev.date);
+  const inner = document.getElementById('checkin-inner');
+  inner.innerHTML = '<div class="status-msg"><span class="spinner"></span> Checking you in…</div>';
+  try{
+    const email = (account.username || '').toLowerCase();
+    const list = await fetchAllAttendance();
+    const existing = list.find(a => (a.email||'').toLowerCase() === email && String(a.eventId) === String(eventId));
+    if(existing){
+      const t = existing.checkedInAt ? new Date(existing.checkedInAt).toLocaleString() : '';
+      inner.innerHTML = '<div class="checkin-badge">✅</div><div class="confirm-title">You\'re checked in</div><div class="confirm-sub">' + esc(t) + '</div>';
+    }else{
+      // No manual button — scanning the QR + signing in is the whole action. Auto-log it now.
+      await doCheckIn(ev);
+    }
+  }catch(e){
+    inner.innerHTML = '<div class="status-msg err">'+esc(e.message || String(e))+'</div><button class="btn btn-primary" id="checkin-retry-btn" style="margin-top:10px">Retry</button>';
+    const retryBtn = document.getElementById('checkin-retry-btn');
+    if(retryBtn) retryBtn.onclick = () => renderGuestCheckin(eventId);
+  }
+}
+async function doCheckIn(ev){
+  if(checkinInFlight)return;
+  checkinInFlight = true;
+  const inner = document.getElementById('checkin-inner');
+  try{
+    await addAttendee(ev.id, ev.name, ev.date, account.name || account.username, account.username || '');
+    const t = new Date().toLocaleString();
+    inner.innerHTML = '<div class="checkin-badge">✅</div><div class="confirm-title">You\'re checked in</div><div class="confirm-sub">' + esc(t) + '</div>';
+  }catch(e){
+    inner.innerHTML = '<div class="status-msg err">'+esc(e.message || String(e))+'</div><button class="btn btn-primary" id="checkin-retry-btn" style="margin-top:10px">Retry</button>';
+    const retryBtn = document.getElementById('checkin-retry-btn');
+    if(retryBtn) retryBtn.onclick = () => renderGuestCheckin(ev.id);
+  }finally{
+    checkinInFlight = false;
+  }
+}
+
+/* ------------------------------ ADMIN: HOME ------------------------------ */
+async function showAdminHome(){
+  currentEventId = null;
+  document.getElementById('admin-detail-view').classList.add('hidden');
+  document.getElementById('admin-home-view').classList.remove('hidden');
+  document.getElementById('admin-events-list-view').classList.remove('hidden');
+  await renderEventsList();
+}
+async function renderEventsList(){
+  setStatus('events-list-status', 'Loading…');
+  try{
+    const [events, attendance] = await Promise.all([fetchEvents(), fetchAllAttendance()]);
+    allEventsCache = events;
+    const counts = {};
+    attendance.forEach(a => { counts[a.eventId] = (counts[a.eventId]||0) + 1; });
+    const listEl = document.getElementById('events-list');
+    if(!events.length){
+      listEl.innerHTML = '<div class="empty-state">No events yet — create one above</div>';
+    }else{
+      listEl.innerHTML = events.map(ev =>
+        '<div class="event-row">' +
+          '<div><div class="en">' + esc(ev.name) + '</div><div class="ed">' + esc(fmtDate(ev.date)) + '</div></div>' +
+          '<div style="display:flex;align-items:center;gap:8px">' +
+            '<span class="count-badge">' + (counts[ev.id]||0) + '</span>' +
+            '<button class="btn-outline" data-open="' + esc(ev.id) + '">Open</button>' +
+          '</div>' +
+        '</div>'
+      ).join('');
+      listEl.querySelectorAll('[data-open]').forEach(b => b.onclick = () => openEventDetail(b.getAttribute('data-open')));
+    }
+    setStatus('events-list-status', '');
+  }catch(e){
+    setStatus('events-list-status', e.message || String(e), 'err');
+  }
+}
+async function handleCreateEvent(){
+  const name = document.getElementById('new-event-name').value.trim();
+  const date = document.getElementById('new-event-date').value;
+  if(!name){ setStatus('create-event-status', 'Enter an event name.', 'err'); return; }
+  if(!date){ setStatus('create-event-status', 'Pick an event date.', 'err'); return; }
+  setStatus('create-event-status', 'Creating…');
+  try{
+    const id = await createEvent(name, date);
+    document.getElementById('new-event-name').value = '';
+    document.getElementById('new-event-date').value = '';
+    setStatus('create-event-status', '');
+    await openEventDetail(id);
+  }catch(e){
+    setStatus('create-event-status', e.message || String(e), 'err');
+  }
+}
+
+/* ----------------------------- ADMIN: DETAIL ----------------------------- */
+async function openEventDetail(eventId){
+  currentEventId = eventId;
+  document.getElementById('admin-home-view').classList.add('hidden');
+  document.getElementById('admin-events-list-view').classList.add('hidden');
+  document.getElementById('admin-detail-view').classList.remove('hidden');
+  const ev = await fetchEventById(eventId);
+  if(!ev){ setStatus('detail-status', 'Event not found.', 'err'); return; }
+  document.getElementById('detail-event-name').textContent = ev.name;
+  document.getElementById('detail-event-date').textContent = fmtDate(ev.date);
+  const checkinUrl = baseUrl + '?event=' + encodeURIComponent(eventId);
+  document.getElementById('qr-img').src = 'https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=8&data=' + encodeURIComponent(checkinUrl);
+  document.getElementById('qr-url').textContent = checkinUrl;
+  await refreshDetail();
+}
+async function refreshDetail(){
+  try{
+    const all = await fetchAllAttendance();
+    const list = all.filter(a => String(a.eventId) === String(currentEventId))
+                     .sort((a,b) => (b.checkedInAt||'').localeCompare(a.checkedInAt||''));
+    detailAttendeesCache = list;
+    document.getElementById('detail-count').textContent = list.length;
+    const listEl = document.getElementById('detail-list');
+    listEl.innerHTML = list.length
+      ? list.map(a => '<div class="attendee-row"><span class="n">' + esc(a.name||a.email) + '</span><span class="t">' + esc(a.checkedInAt ? new Date(a.checkedInAt).toLocaleTimeString() : '') + '</span></div>').join('')
+      : '<div class="empty-state">No check-ins yet</div>';
+    setStatus('detail-status', 'Last updated ' + new Date().toLocaleTimeString());
+  }catch(e){
+    setStatus('detail-status', e.message || String(e), 'err');
+  }
+}
+function exportDetailCSV(){
+  const headers = ['Name','Email','Checked In At','Event','Event Date'];
+  const rows = detailAttendeesCache.map(a => [a.name, a.email, a.checkedInAt, a.eventName, document.getElementById('detail-event-date').textContent]
+    .map(v => '"' + String(v||'').replace(/"/g,'""') + '"').join(','));
+  const csv = [headers.join(','), ...rows].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'attendance-' + document.getElementById('detail-event-name').textContent.replace(/\s+/g,'_') + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+async function clearDetailAttendance(){
+  const pin = prompt('Enter admin PIN to clear attendance for this event:');
+  if(pin === null) return;
+  if(pin !== ADMIN_PIN){ alert('Incorrect PIN.'); return; }
+  if(!confirm('This will permanently delete all check-ins for this event. Continue?')) return;
+  setStatus('detail-status', 'Clearing…');
+  try{
+    for(const a of detailAttendeesCache){ await deleteAttendee(a.id); }
+    await refreshDetail();
+  }catch(e){
+    setStatus('detail-status', e.message || String(e), 'err');
+  }
+}
+async function deleteCurrentEvent(){
+  const pin = prompt('Enter admin PIN to delete this event (and all its attendance):');
+  if(pin === null) return;
+  if(pin !== ADMIN_PIN){ alert('Incorrect PIN.'); return; }
+  if(!confirm('This will permanently delete the event and its attendance records. Continue?')) return;
+  setStatus('detail-status', 'Deleting…');
+  try{
+    for(const a of detailAttendeesCache){ await deleteAttendee(a.id); }
+    await deleteEvent(currentEventId);
+    await showAdminHome();
+  }catch(e){
+    setStatus('detail-status', e.message || String(e), 'err');
+  }
+}
+
+/* ------------------------------- BOOT ------------------------------------ */
+document.getElementById('signin-btn').onclick = doSignIn;
+document.getElementById('create-event-btn').onclick = handleCreateEvent;
+document.getElementById('back-to-events-btn').onclick = showAdminHome;
+document.getElementById('detail-refresh-btn').onclick = refreshDetail;
+document.getElementById('detail-export-btn').onclick = exportDetailCSV;
+document.getElementById('detail-clear-btn').onclick = clearDetailAttendance;
+document.getElementById('detail-delete-btn').onclick = deleteCurrentEvent;
+
+(async function boot(){
+  await msalApp.handleRedirectPromise().catch(()=>{});
+  const accounts = msalApp.getAllAccounts();
+  if(accounts.length){
+    account = accounts[0];
+    msalApp.setActiveAccount(account);
+    afterSignIn();
+  }
+})();
+</script>
+</body>
+</html>
