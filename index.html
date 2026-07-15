@@ -230,10 +230,20 @@ function fmtDate(iso){
 }
 
 /* ------------------------------ GRAPH HELPERS --------------------------- */
+// Popup and silent (hidden-iframe) auth flows must NOT redirect back into the
+// full app — that causes the popup to load the whole dashboard instead of
+// quietly closing, and concurrent calls then collide with "interaction_in_progress."
+const BLANK_REDIRECT_URI = window.location.origin + window.location.pathname.replace(/[^/]*$/, '') + 'blank.html';
+let tokenPromise = null;
 async function getToken(){
-  const req = { scopes: GRAPH_SCOPES, account };
-  try{ return (await msalApp.acquireTokenSilent(req)).accessToken; }
-  catch(e){ return (await msalApp.acquireTokenPopup(req)).accessToken; }
+  if(tokenPromise) return tokenPromise; // reuse the in-flight request instead of racing a second popup
+  const req = { scopes: GRAPH_SCOPES, account, redirectUri: BLANK_REDIRECT_URI };
+  tokenPromise = (async () => {
+    try{ return (await msalApp.acquireTokenSilent(req)).accessToken; }
+    catch(e){ return (await msalApp.acquireTokenPopup(req)).accessToken; }
+  })();
+  try{ return await tokenPromise; }
+  finally{ tokenPromise = null; }
 }
 async function graphFetch(url, opts){
   const token = await getToken();
@@ -350,7 +360,7 @@ async function deleteAttendee(id){
 async function doSignIn(){
   setStatus('signin-status', 'Opening Microsoft sign-in…');
   try{
-    const r = await msalApp.loginPopup({ scopes: GRAPH_SCOPES });
+    const r = await msalApp.loginPopup({ scopes: GRAPH_SCOPES, redirectUri: BLANK_REDIRECT_URI });
     account = r.account;
     msalApp.setActiveAccount(account);
     afterSignIn();
