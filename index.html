@@ -253,21 +253,45 @@ async function graphFetch(url, opts){
 }
 async function ensureListExists(listName, columns){
   const itemsUrl = SP_SITE_URL + ':/lists/' + listName + '/items';
+  let listExists = false;
   try{
     const check = await graphFetch(itemsUrl + '?$top=1');
-    if(check.ok) return true;
-    if(check.status !== 404) return true;
-  }catch(e){}
-  const siteRes = await graphFetch(SP_SITE_URL);
-  if(!siteRes.ok) throw new Error('Cannot reach SharePoint site "' + SP_SITE_PATH + '".');
-  const site = await siteRes.json();
-  const createRes = await graphFetch('https://graph.microsoft.com/v1.0/sites/' + site.id + '/lists', {
-    method: 'POST',
-    body: JSON.stringify({ displayName: listName, columns: columns, list: { template: 'genericList' } })
-  });
-  if(!createRes.ok){
-    const t = await createRes.text();
-    throw new Error('Could not auto-create the "' + listName + '" list. (' + t + ')');
+    listExists = check.ok;
+  }catch(e){ listExists = false; }
+
+  if(!listExists){
+    const siteRes = await graphFetch(SP_SITE_URL);
+    if(!siteRes.ok) throw new Error('Cannot reach SharePoint site "' + SP_SITE_PATH + '".');
+    const site = await siteRes.json();
+    const createRes = await graphFetch('https://graph.microsoft.com/v1.0/sites/' + site.id + '/lists', {
+      method: 'POST',
+      body: JSON.stringify({ displayName: listName, columns: columns, list: { template: 'genericList' } })
+    });
+    if(!createRes.ok){
+      const t = await createRes.text();
+      throw new Error('Could not auto-create the "' + listName + '" list. (' + t + ')');
+    }
+    return true; // freshly created with the full schema — nothing more to check
+  }
+
+  // The list already existed (e.g. created manually) — this is the part that was
+  // previously skipped entirely. Verify every required column is actually there,
+  // and add whichever ones are missing instead of silently assuming it's fine.
+  const colRes = await graphFetch(SP_SITE_URL + ':/lists/' + listName + '/columns');
+  if(colRes.ok){
+    const colData = await colRes.json();
+    const existingNames = (colData.value || []).map(c => c.name);
+    const missing = columns.filter(c => !existingNames.includes(c.name));
+    for(const col of missing){
+      const addRes = await graphFetch(SP_SITE_URL + ':/lists/' + listName + '/columns', {
+        method: 'POST',
+        body: JSON.stringify({ name: col.name, text: col.text || {} })
+      });
+      if(!addRes.ok){
+        const t = await addRes.text();
+        throw new Error('List "' + listName + '" is missing the "' + col.name + '" column and it could not be added automatically. (' + t + ')');
+      }
+    }
   }
   return true;
 }
@@ -309,13 +333,20 @@ async function fetchEventById(id){
   };
 }
 async function createEvent(name, dateISO){
-  const res = await graphFetch(EVENTS_ITEMS_URL, {
-    method: 'POST',
-    body: JSON.stringify({ fields: { Title: name, EventDate: dateISO, Locked: 'false' } })
-  });
-  if(!res.ok){ const t = await res.text(); throw new Error('Could not create event. (' + t + ')'); }
-  const created = await res.json();
-  return created.id;
+  const body = JSON.stringify({ fields: { Title: name, EventDate: dateISO, Locked: 'false' } });
+  let lastErr = null;
+  for(let attempt = 1; attempt <= 3; attempt++){
+    const res = await graphFetch(EVENTS_ITEMS_URL, { method: 'POST', body });
+    if(res.ok){ const created = await res.json(); return created.id; }
+    const t = await res.text();
+    lastErr = new Error('Could not create event. (' + t + ')');
+    // A just-created/just-verified column can take a few seconds to become writable
+    // even after it shows up in the schema. Retry a couple of times before giving up.
+    const isFieldTiming = /is not recognized|invalidRequest/i.test(t);
+    if(!isFieldTiming || attempt === 3) throw lastErr;
+    await new Promise(r => setTimeout(r, attempt * 2000));
+  }
+  throw lastErr;
 }
 async function setEventLocked(id, locked){
   const res = await graphFetch(EVENTS_ITEMS_URL + '/' + id, {
