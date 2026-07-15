@@ -12,20 +12,22 @@
  DEDALE COMPANY EVENTS — SETUP NOTES (read before deploying)
 ============================================================================
 1. AZURE AD / MSAL
-   - Reuse the SAME Client ID + Tenant used by Service Desk / Task Manager /
-     Inventory (already has Sites.ReadWrite.All admin-consented).
-   - Paste that Client ID + Tenant ID into MSAL_CONFIG below.
-   - In Entra admin center -> App registrations -> that app -> Authentication
-     -> add THIS page's final deployed URL as a Redirect URI (SPA platform),
-     or sign-in will fail with a redirect mismatch error.
+   - Uses its OWN dedicated app registration ("Dedale Events") — already
+     configured below with Client ID + Tenant ID, Sites.ReadWrite.All +
+     User.Read granted with admin consent, and this file's deployed URL
+     registered as a Redirect URI (SPA platform).
+   - If you ever redeploy this to a DIFFERENT URL, add that new URL as an
+     additional Redirect URI on the "Dedale Events" app registration in
+     Entra, or sign-in will fail with a redirect mismatch error.
 
 2. SHAREPOINT STORAGE
    - Two lists are used: "CompanyEvents" (one row per event) and
      "EventAttendance" (one row per check-in, linked by EventId).
    - Both are created automatically the first time the admin view loads, if
      they don't already exist. No manual list setup needed.
-   - Defaults to the existing ITServiceDesk site (SP_HOSTNAME / SP_SITE_PATH
-     below) — change if you'd rather use a different site.
+   - Points at a dedicated "DedaleEvents" SharePoint site (SP_HOSTNAME /
+     SP_SITE_PATH below) — create that site first, or change these
+     constants to point at whichever site you'd rather use.
 
 3. USING IT
    - Admin: open the deployed URL with ?view=admin — create an event (name +
@@ -92,6 +94,9 @@ body{font-family:'Rajdhani',sans-serif;background:var(--bg);color:var(--text);mi
 .event-row .en{color:var(--text);font-weight:600;font-size:14px;}
 .event-row .ed{color:var(--text3);font-size:11px;font-family:'Share Tech Mono',monospace;letter-spacing:.5px;}
 .count-badge{background:var(--surface2);border:1px solid var(--border);color:var(--gold);font-family:'Orbitron',monospace;font-size:12px;padding:4px 10px;flex-shrink:0;}
+.lock-badge{display:inline-block;font-family:'Share Tech Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:5px 12px;border:1px solid var(--border);}
+.lock-badge.locked{color:var(--crimson-glow);border-color:var(--crimson-dark);background:rgba(204,34,68,.08);}
+.lock-badge.open{color:var(--green);border-color:var(--green);background:rgba(34,204,136,.08);}
 </style>
 </head>
 <body>
@@ -147,7 +152,8 @@ body{font-family:'Rajdhani',sans-serif;background:var(--bg);color:var(--text);mi
   <div class="card hidden" id="admin-detail-view">
     <button class="btn-outline" id="back-to-events-btn" style="margin-bottom:16px">← All Events</button>
     <div class="event-name" id="detail-event-name"></div>
-    <div class="event-date" id="detail-event-date" style="margin-bottom:16px"></div>
+    <div class="event-date" id="detail-event-date" style="margin-bottom:6px"></div>
+    <div class="center" id="detail-lock-badge" style="margin-bottom:16px"></div>
     <span class="section-label">Scan to check in</span>
     <div class="qr-wrap"><img id="qr-img" alt="QR code"></div>
     <div class="qr-url" id="qr-url" style="margin-bottom:16px"></div>
@@ -160,8 +166,9 @@ body{font-family:'Rajdhani',sans-serif;background:var(--bg);color:var(--text);mi
     <div class="btn-row" style="margin-top:16px">
       <button class="btn-outline" id="detail-refresh-btn">↻ Refresh</button>
       <button class="btn-outline" id="detail-export-btn">⭳ Export CSV</button>
-      <button class="btn-danger" id="detail-clear-btn">✕ Clear Attendance</button>
-      <button class="btn-danger" id="detail-delete-btn">🗑 Delete Event</button>
+      <button class="btn-outline" id="detail-lock-btn">🔒 Lock Event</button>
+      <button class="btn-danger hidden" id="detail-clear-btn">✕ Clear Attendance</button>
+      <button class="btn-danger hidden" id="detail-delete-btn">🗑 Delete Event</button>
     </div>
     <div class="status-msg" id="detail-status"></div>
   </div>
@@ -173,16 +180,16 @@ body{font-family:'Rajdhani',sans-serif;background:var(--bg);color:var(--text);mi
 /* ============================== CONFIG ================================ */
 const MSAL_CONFIG = {
   auth: {
-    clientId: 'PASTE_CLIENT_ID_HERE',               // same Client ID as Service Desk / Task Manager
-    authority: 'https://login.microsoftonline.com/PASTE_TENANT_ID_HERE',
+    clientId: '0912bb35-a66d-4bfd-937f-aaa4e347d415',      // Dedale Events (dedicated app registration)
+    authority: 'https://login.microsoftonline.com/115d6eac-9c52-4e39-9c4c-f8d77ede8a9d',
     redirectUri: window.location.origin + window.location.pathname
   },
   cache: { cacheLocation: 'localStorage' }
 };
 const GRAPH_SCOPES = ['Sites.ReadWrite.All', 'User.Read'];
 
-const SP_HOSTNAME     = 'softwareclub.sharepoint.com'; // same tenant as ITServiceDesk site
-const SP_SITE_PATH    = '/sites/ITServiceDesk';        // change if you want a different site
+const SP_HOSTNAME     = 'softwareclub.sharepoint.com'; // same tenant, all Dedale sites live here
+const SP_SITE_PATH    = '/sites/DedaleEvents';         // dedicated site for this app — create it first (see setup notes)
 const EVENTS_LIST     = 'CompanyEvents';               // auto-created on first admin load if missing
 const ATTENDANCE_LIST = 'EventAttendance';             // auto-created on first admin load if missing
 
@@ -256,7 +263,8 @@ async function ensureListExists(listName, columns){
 }
 async function ensureListsExist(){
   await ensureListExists(EVENTS_LIST, [
-    { name: 'EventDate', text: {} }
+    { name: 'EventDate', text: {} },
+    { name: 'Locked', text: {} }
   ]);
   await ensureListExists(ATTENDANCE_LIST, [
     { name: 'Email', text: {} },
@@ -275,23 +283,36 @@ async function fetchEvents(){
   return (data.value || []).map(it => ({
     id: it.id,
     name: (it.fields && it.fields.Title) || '',
-    date: (it.fields && it.fields.EventDate) || ''
+    date: (it.fields && it.fields.EventDate) || '',
+    locked: (it.fields && it.fields.Locked) === 'true'
   })).sort((a,b) => (b.date||'').localeCompare(a.date||''));
 }
 async function fetchEventById(id){
   const res = await graphFetch(EVENTS_ITEMS_URL + '/' + id + '?expand=fields');
   if(!res.ok) return null;
   const it = await res.json();
-  return { id: it.id, name: (it.fields && it.fields.Title) || '', date: (it.fields && it.fields.EventDate) || '' };
+  return {
+    id: it.id,
+    name: (it.fields && it.fields.Title) || '',
+    date: (it.fields && it.fields.EventDate) || '',
+    locked: (it.fields && it.fields.Locked) === 'true'
+  };
 }
 async function createEvent(name, dateISO){
   const res = await graphFetch(EVENTS_ITEMS_URL, {
     method: 'POST',
-    body: JSON.stringify({ fields: { Title: name, EventDate: dateISO } })
+    body: JSON.stringify({ fields: { Title: name, EventDate: dateISO, Locked: 'false' } })
   });
   if(!res.ok){ const t = await res.text(); throw new Error('Could not create event. (' + t + ')'); }
   const created = await res.json();
   return created.id;
+}
+async function setEventLocked(id, locked){
+  const res = await graphFetch(EVENTS_ITEMS_URL + '/' + id, {
+    method: 'PATCH',
+    body: JSON.stringify({ fields: { Locked: locked ? 'true' : 'false' } })
+  });
+  if(!res.ok){ const t = await res.text(); throw new Error('Could not update lock state. (' + t + ')'); }
 }
 async function deleteEvent(id){
   const res = await graphFetch(EVENTS_ITEMS_URL + '/' + id, { method: 'DELETE' });
@@ -387,6 +408,8 @@ async function renderGuestCheckin(eventId){
     if(existing){
       const t = existing.checkedInAt ? new Date(existing.checkedInAt).toLocaleString() : '';
       inner.innerHTML = '<div class="checkin-badge">✅</div><div class="confirm-title">You\'re checked in</div><div class="confirm-sub">' + esc(t) + '</div>';
+    }else if(ev.locked){
+      inner.innerHTML = '<div class="confirm-sub" style="margin-top:10px">This event has concluded and check-in is now closed.</div>';
     }else{
       // No manual button — scanning the QR + signing in is the whole action. Auto-log it now.
       await doCheckIn(ev);
@@ -435,7 +458,7 @@ async function renderEventsList(){
     }else{
       listEl.innerHTML = events.map(ev =>
         '<div class="event-row">' +
-          '<div><div class="en">' + esc(ev.name) + '</div><div class="ed">' + esc(fmtDate(ev.date)) + '</div></div>' +
+          '<div><div class="en">' + esc(ev.name) + '</div><div class="ed">' + esc(fmtDate(ev.date)) + (ev.locked ? ' · <span style="color:var(--crimson-glow)">🔒 locked</span>' : '') + '</div></div>' +
           '<div style="display:flex;align-items:center;gap:8px">' +
             '<span class="count-badge">' + (counts[ev.id]||0) + '</span>' +
             '<button class="btn-outline" data-open="' + esc(ev.id) + '">Open</button>' +
@@ -467,6 +490,7 @@ async function handleCreateEvent(){
 }
 
 /* ----------------------------- ADMIN: DETAIL ----------------------------- */
+let currentEventLocked = false;
 async function openEventDetail(eventId){
   currentEventId = eventId;
   document.getElementById('admin-home-view').classList.add('hidden');
@@ -476,10 +500,50 @@ async function openEventDetail(eventId){
   if(!ev){ setStatus('detail-status', 'Event not found.', 'err'); return; }
   document.getElementById('detail-event-name').textContent = ev.name;
   document.getElementById('detail-event-date').textContent = fmtDate(ev.date);
+  currentEventLocked = !!ev.locked;
+  renderLockUI();
   const checkinUrl = baseUrl + '?event=' + encodeURIComponent(eventId);
   document.getElementById('qr-img').src = 'https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=8&data=' + encodeURIComponent(checkinUrl);
   document.getElementById('qr-url').textContent = checkinUrl;
   await refreshDetail();
+}
+function renderLockUI(){
+  const badge = document.getElementById('detail-lock-badge');
+  const lockBtn = document.getElementById('detail-lock-btn');
+  const clearBtn = document.getElementById('detail-clear-btn');
+  const deleteBtn = document.getElementById('detail-delete-btn');
+  if(currentEventLocked){
+    badge.innerHTML = '<span class="lock-badge locked">🔒 Locked — check-in closed</span>';
+    lockBtn.textContent = '🔓 Unlock Event';
+    clearBtn.classList.add('hidden');
+    deleteBtn.classList.add('hidden');
+  }else{
+    badge.innerHTML = '<span class="lock-badge open">🔓 Open — accepting check-ins</span>';
+    lockBtn.textContent = '🔒 Lock Event';
+    clearBtn.classList.remove('hidden');
+    deleteBtn.classList.remove('hidden');
+  }
+}
+async function toggleEventLock(){
+  const wantLocked = !currentEventLocked;
+  // Locking is a safe, restrictive action — no PIN needed.
+  // Unlocking re-opens the door to manipulation, so it requires the admin PIN, same as Clear/Delete.
+  if(wantLocked){
+    if(!confirm('Lock this event? Check-in will close immediately and Clear/Delete will be disabled until it\'s unlocked.'))return;
+  }else{
+    const pin = prompt('Enter admin PIN to unlock this event:');
+    if(pin === null) return;
+    if(pin !== ADMIN_PIN){ alert('Incorrect PIN.'); return; }
+  }
+  setStatus('detail-status', wantLocked ? 'Locking…' : 'Unlocking…');
+  try{
+    await setEventLocked(currentEventId, wantLocked);
+    currentEventLocked = wantLocked;
+    renderLockUI();
+    setStatus('detail-status', wantLocked ? 'Event locked ✓' : 'Event unlocked ✓');
+  }catch(e){
+    setStatus('detail-status', e.message || String(e), 'err');
+  }
 }
 async function refreshDetail(){
   try{
@@ -509,6 +573,7 @@ function exportDetailCSV(){
   document.body.appendChild(a); a.click(); a.remove();
 }
 async function clearDetailAttendance(){
+  if(currentEventLocked){ alert('This event is locked. Unlock it first to clear attendance.'); return; }
   const pin = prompt('Enter admin PIN to clear attendance for this event:');
   if(pin === null) return;
   if(pin !== ADMIN_PIN){ alert('Incorrect PIN.'); return; }
@@ -522,6 +587,7 @@ async function clearDetailAttendance(){
   }
 }
 async function deleteCurrentEvent(){
+  if(currentEventLocked){ alert('This event is locked. Unlock it first to delete it.'); return; }
   const pin = prompt('Enter admin PIN to delete this event (and all its attendance):');
   if(pin === null) return;
   if(pin !== ADMIN_PIN){ alert('Incorrect PIN.'); return; }
@@ -542,6 +608,7 @@ document.getElementById('create-event-btn').onclick = handleCreateEvent;
 document.getElementById('back-to-events-btn').onclick = showAdminHome;
 document.getElementById('detail-refresh-btn').onclick = refreshDetail;
 document.getElementById('detail-export-btn').onclick = exportDetailCSV;
+document.getElementById('detail-lock-btn').onclick = toggleEventLock;
 document.getElementById('detail-clear-btn').onclick = clearDetailAttendance;
 document.getElementById('detail-delete-btn').onclick = deleteCurrentEvent;
 
