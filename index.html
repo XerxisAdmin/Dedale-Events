@@ -170,6 +170,7 @@ body{font-family:'Rajdhani',sans-serif;background:var(--bg);color:var(--text);mi
       <button class="btn-danger hidden" id="detail-clear-btn">✕ Clear Attendance</button>
       <button class="btn-danger hidden" id="detail-delete-btn">🗑 Delete Event</button>
     </div>
+    <div class="status-msg" id="detail-viewonly-note" style="margin-top:6px"></div>
     <div class="status-msg" id="detail-status"></div>
   </div>
 
@@ -194,6 +195,10 @@ const EVENTS_LIST     = 'CompanyEvents';               // auto-created on first 
 const ATTENDANCE_LIST = 'EventAttendance';             // auto-created on first admin load if missing
 
 const ADMIN_PIN = '307273';                            // gates Clear Attendance / Delete Event / Unlock
+// Only these emails get full admin powers (Create Event, Export, Lock, Clear, Delete).
+// Everyone else who opens ?view=admin sees the QR code and attendee list only — read-only.
+const ADMIN_EMAILS = ['xerxis.dalanon@dedale.com'];
+let isAdminUser = false;
 /* ======================================================================= */
 
 const SP_SITE_URL        = 'https://graph.microsoft.com/v1.0/sites/' + SP_HOSTNAME + ':' + SP_SITE_PATH;
@@ -410,6 +415,19 @@ async function doSignIn(){
     msalApp.setActiveAccount(account);
     afterSignIn();
   }catch(e){
+    const msg = (e && (e.errorCode || e.message || '')) + '';
+    // If the popup was blocked (common on mobile / strict browsers), fall back to a
+    // full-page redirect sign-in, which needs no popup at all. Returns to the app page.
+    if(/popup_window_error|popup.*block|empty_window|user_cancelled/i.test(msg)){
+      setStatus('signin-status', 'Popup blocked — redirecting to sign-in…');
+      try{
+        await msalApp.loginRedirect({ scopes: GRAPH_SCOPES, redirectUri: window.location.href });
+        return;
+      }catch(e2){
+        setStatus('signin-status', 'Sign-in failed: ' + (e2.errorMessage || e2.message || e2), 'err');
+        return;
+      }
+    }
     setStatus('signin-status', 'Sign-in failed: ' + (e.errorMessage || e.message || e), 'err');
   }
 }
@@ -425,9 +443,11 @@ function renderUserChip(){
 async function afterSignIn(){
   document.getElementById('signin-view').classList.add('hidden');
   renderUserChip();
+  const email = ((account && account.username) || '').toLowerCase();
+  isAdminUser = ADMIN_EMAILS.map(e => e.toLowerCase()).includes(email);
   try{ await ensureListsExist(); }catch(e){ /* surfaced later if it truly blocks an action */ }
   if(isAdmin){
-    document.getElementById('logo-sub').textContent = 'Company Events — Admin';
+    document.getElementById('logo-sub').textContent = isAdminUser ? 'Company Events — Admin' : 'Company Events — View only';
     if(currentEventId){ openEventDetail(currentEventId); }
     else{ showAdminHome(); }
   }else{
@@ -496,7 +516,7 @@ async function doCheckIn(ev){
 async function showAdminHome(){
   currentEventId = null;
   document.getElementById('admin-detail-view').classList.add('hidden');
-  document.getElementById('admin-home-view').classList.remove('hidden');
+  document.getElementById('admin-home-view').classList.toggle('hidden', !isAdminUser); // create form: admin only
   document.getElementById('admin-events-list-view').classList.remove('hidden');
   await renderEventsList();
 }
@@ -528,6 +548,7 @@ async function renderEventsList(){
   }
 }
 async function handleCreateEvent(){
+  if(!isAdminUser){ setStatus('create-event-status', 'Only the event admin can create events.', 'err'); return; }
   const name = document.getElementById('new-event-name').value.trim();
   const date = document.getElementById('new-event-date').value;
   if(!name){ setStatus('create-event-status', 'Enter an event name.', 'err'); return; }
@@ -567,6 +588,26 @@ function renderLockUI(){
   const lockBtn = document.getElementById('detail-lock-btn');
   const clearBtn = document.getElementById('detail-clear-btn');
   const deleteBtn = document.getElementById('detail-delete-btn');
+  const exportBtn = document.getElementById('detail-export-btn');
+  const note = document.getElementById('detail-viewonly-note');
+
+  // Non-admins get the QR + attendee list + Refresh only. Everything else is hidden.
+  if(!isAdminUser){
+    exportBtn.classList.add('hidden');
+    lockBtn.classList.add('hidden');
+    clearBtn.classList.add('hidden');
+    deleteBtn.classList.add('hidden');
+    badge.innerHTML = currentEventLocked
+      ? '<span class="lock-badge locked">🔒 Locked — check-in closed</span>'
+      : '<span class="lock-badge open">🔓 Open — accepting check-ins</span>';
+    note.textContent = 'View only — contact the event admin to manage this event.';
+    return;
+  }
+
+  // Admin: full controls.
+  exportBtn.classList.remove('hidden');
+  lockBtn.classList.remove('hidden');
+  note.textContent = '';
   if(currentEventLocked){
     badge.innerHTML = '<span class="lock-badge locked">🔒 Locked — check-in closed</span>';
     lockBtn.textContent = '🔓 Unlock Event';
@@ -580,6 +621,7 @@ function renderLockUI(){
   }
 }
 async function toggleEventLock(){
+  if(!isAdminUser){ alert('Only the event admin can lock or unlock events.'); return; }
   const wantLocked = !currentEventLocked;
   // Locking is a safe, restrictive action — no PIN needed.
   // Unlocking re-opens the door to manipulation, so it requires the admin PIN, same as Clear/Delete.
@@ -617,6 +659,7 @@ async function refreshDetail(){
   }
 }
 function exportDetailCSV(){
+  if(!isAdminUser){ alert('Only the event admin can export attendance.'); return; }
   const headers = ['Name','Email','Checked In At','Event','Event Date'];
   const rows = detailAttendeesCache.map(a => [a.name, a.email, a.checkedInAt, a.eventName, document.getElementById('detail-event-date').textContent]
     .map(v => '"' + String(v||'').replace(/"/g,'""') + '"').join(','));
@@ -628,6 +671,7 @@ function exportDetailCSV(){
   document.body.appendChild(a); a.click(); a.remove();
 }
 async function clearDetailAttendance(){
+  if(!isAdminUser){ alert('Only the event admin can clear attendance.'); return; }
   if(currentEventLocked){ alert('This event is locked. Unlock it first to clear attendance.'); return; }
   const pin = prompt('Enter admin PIN to clear attendance for this event:');
   if(pin === null) return;
@@ -642,6 +686,7 @@ async function clearDetailAttendance(){
   }
 }
 async function deleteCurrentEvent(){
+  if(!isAdminUser){ alert('Only the event admin can delete events.'); return; }
   if(currentEventLocked){ alert('This event is locked. Unlock it first to delete it.'); return; }
   const pin = prompt('Enter admin PIN to delete this event (and all its attendance):');
   if(pin === null) return;
@@ -668,7 +713,14 @@ document.getElementById('detail-clear-btn').onclick = clearDetailAttendance;
 document.getElementById('detail-delete-btn').onclick = deleteCurrentEvent;
 
 (async function boot(){
-  await msalApp.handleRedirectPromise().catch(()=>{});
+  let redirectResult = null;
+  try{ redirectResult = await msalApp.handleRedirectPromise(); }catch(e){ /* ignore */ }
+  if(redirectResult && redirectResult.account){
+    account = redirectResult.account;
+    msalApp.setActiveAccount(account);
+    afterSignIn();
+    return;
+  }
   const accounts = msalApp.getAllAccounts();
   if(accounts.length){
     account = accounts[0];
